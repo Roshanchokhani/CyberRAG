@@ -2,6 +2,12 @@
                          CYBERRAG INTERVIEW DEMO GUIDE
 ================================================================================
 
+STREAMLIT UI (Recommended for Demo):
+------------------------------------
+1. Start the API server first (see below)
+2. In a new terminal: streamlit run streamlit_app.py
+3. Open: http://localhost:8501
+
 STARTUP SEQUENCE:
 -----------------
 1. Start Docker Desktop (wait for it to fully load)
