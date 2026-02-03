@@ -1,0 +1,58 @@
+================================================================================
+                         CYBERRAG INTERVIEW DEMO GUIDE
+================================================================================
+
+STARTUP SEQUENCE:
+-----------------
+1. Start Docker Desktop (wait for it to fully load)
+2. Double-click: start_demo.bat
+   OR run these commands:
+      docker start cyberrag-postgres
+      python run_server.py
+
+URLS:
+-----
+- API Health Check: http://localhost:8000/health
+- Swagger Docs:     http://localhost:8000/docs
+- Schema Info:      http://localhost:8000/schema
+
+DEMO QUERIES (copy-paste these):
+--------------------------------
+
+1. Top Attack Types:
+   curl -X POST http://localhost:8000/query -H "Content-Type: application/json" -d "{\"query\": \"What are the top 10 most common attack types?\"}"
+
+2. Geographic Distribution:
+   curl -X POST http://localhost:8000/query -H "Content-Type: application/json" -d "{\"query\": \"Show geographic distribution of attacks by source country\"}"
+
+3. Detection Rate:
+   curl -X POST http://localhost:8000/query -H "Content-Type: application/json" -d "{\"query\": \"What percentage of attacks are detected?\"}"
+
+4. Country-to-Country:
+   curl -X POST http://localhost:8000/query -H "Content-Type: application/json" -d "{\"query\": \"How many attacks from China targeted USA?\"}"
+
+5. NOT AVAILABLE Test (Important!):
+   curl -X POST http://localhost:8000/query -H "Content-Type: application/json" -d "{\"query\": \"Get top vulnerabilities with user impact and financial loss\"}"
+
+RUN FULL TEST:
+--------------
+   python scripts/test_client.py
+
+KEY FILES TO SHOW:
+------------------
+- app/rag_engine.py    -> RAG + LLM logic
+- app/main.py          -> FastAPI async endpoints
+- app/database.py      -> PostgreSQL connection
+- scripts/import_data.py -> Data import script
+
+ARCHITECTURE:
+-------------
+Client (curl) -> FastAPI (async) -> RAG Engine (Ollama) -> PostgreSQL
+
+TALKING POINTS:
+---------------
+- Text-to-SQL approach (not vector RAG) because data is structured
+- Async for handling concurrent requests during LLM wait time
+- Schema context injection for accurate SQL generation
+- Safety: Only SELECT queries allowed, dangerous keywords blocked
+================================================================================
