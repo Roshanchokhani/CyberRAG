@@ -12,6 +12,7 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import execute_values
 import random
+import re
 from datetime import datetime, timedelta
 import os
 import sys
@@ -24,8 +25,12 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Database configuration
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/cyberrag")
+# Database configuration (must be set via .env — no hardcoded default)
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    print("ERROR: DATABASE_URL environment variable is not set.")
+    print("Set it in .env file: DATABASE_URL=postgresql://user:password@host:port/database")
+    sys.exit(1)
 
 # Parse database URL
 def parse_db_url(url: str) -> dict:
@@ -82,8 +87,12 @@ def create_database_if_not_exists(db_config: dict):
     )
 
     if not cursor.fetchone():
-        print(f"Creating database: {db_config['database']}")
-        cursor.execute(f"CREATE DATABASE {db_config['database']}")
+        db_name = db_config['database']
+        # Validate database name to prevent SQL injection (alphanumeric and underscores only)
+        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', db_name):
+            raise ValueError(f"Invalid database name: {db_name}")
+        print(f"Creating database: {db_name}")
+        cursor.execute(f"CREATE DATABASE {db_name}")
         print("Database created successfully")
     else:
         print(f"Database '{db_config['database']}' already exists")
@@ -158,6 +167,40 @@ def import_csv_data(conn, csv_path: str):
     ]
 
     print(f"Total records to import: {len(df)}")
+
+    # Validate CSV structure
+    expected_columns = 16
+    if len(df.columns) != expected_columns:
+        raise ValueError(f"CSV has {len(df.columns)} columns, expected {expected_columns}")
+
+    # Validate and sanitize data
+    print("Validating and cleaning data...")
+
+    # Validate IP addresses (basic format check)
+    import re
+    ip_pattern = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$')
+    for col in ['source_ip', 'destination_ip']:
+        invalid_ips = df[col].dropna().apply(lambda x: not bool(ip_pattern.match(str(x))))
+        invalid_count = invalid_ips.sum()
+        if invalid_count > 0:
+            print(f"  Warning: {invalid_count} invalid IPs in {col} (will be set to empty)")
+            df.loc[df[col].apply(lambda x: not bool(ip_pattern.match(str(x))) if pd.notna(x) else True), col] = ''
+
+    # Validate numeric ranges
+    df['source_port'] = df['source_port'].clip(0, 65535)
+    df['destination_port'] = df['destination_port'].clip(0, 65535)
+    df['payload_size'] = df['payload_size'].clip(0, None)
+
+    # Truncate string fields to max column lengths to prevent overflow
+    string_length_limits = {
+        'source_ip': 45, 'destination_ip': 45, 'source_country': 100,
+        'destination_country': 100, 'protocol': 20, 'attack_type': 100,
+        'detection_label': 50, 'ml_model': 100, 'affected_system': 100,
+        'port_type': 50,
+    }
+    for col, max_len in string_length_limits.items():
+        if col in df.columns:
+            df[col] = df[col].astype(str).str[:max_len]
 
     # Clean data - handle NaN values
     print("Cleaning data...")

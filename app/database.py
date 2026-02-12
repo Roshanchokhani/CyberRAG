@@ -129,11 +129,13 @@ async def get_connection():
 
 
 async def execute_query(query: str) -> List[Dict[str, Any]]:
-    """Execute a SELECT query and return results as list of dicts."""
+    """Execute a SELECT query in a read-only transaction and return results as list of dicts."""
     async with get_connection() as conn:
         try:
-            rows = await conn.fetch(query)
-            return [dict(row) for row in rows]
+            # Use a read-only transaction to prevent any writes
+            async with conn.transaction(readonly=True):
+                rows = await conn.fetch(query)
+                return [dict(row) for row in rows]
         except Exception as e:
             raise Exception(f"Query execution failed: {str(e)}")
 
@@ -143,34 +145,117 @@ async def execute_query_safe(query: str) -> Dict[str, Any]:
     Execute a query with safety checks.
     Returns dict with 'success', 'data' or 'error' keys.
     """
-    # Basic SQL injection prevention - only allow SELECT
-    query_upper = query.strip().upper()
+    import re
+
+    query_clean = query.strip()
+    query_upper = query_clean.upper()
+
+    # Must start with SELECT
     if not query_upper.startswith("SELECT"):
         return {
             "success": False,
             "error": "Only SELECT queries are allowed"
         }
 
-    # Block dangerous keywords
-    dangerous_keywords = ["DROP", "DELETE", "INSERT", "UPDATE", "ALTER", "TRUNCATE", "EXEC", "--", ";--"]
-    for keyword in dangerous_keywords:
-        if keyword in query_upper:
+    # Strip string literals for structural analysis (handle escaped quotes too)
+    query_no_strings = re.sub(r"'(?:[^']|'')*'", "", query_clean)
+
+    # Block multiple statements
+    if ";" in query_no_strings:
+        return {
+            "success": False,
+            "error": "Multiple SQL statements are not allowed"
+        }
+
+    # Block dangerous keywords (word-boundary matching)
+    dangerous_patterns = [
+        r'\bDROP\b', r'\bDELETE\b', r'\bINSERT\b', r'\bUPDATE\b',
+        r'\bALTER\b', r'\bTRUNCATE\b', r'\bEXEC\b', r'\bEXECUTE\b',
+        r'\bCREATE\b', r'\bGRANT\b', r'\bREVOKE\b', r'\bCOPY\b',
+        r'\bLOAD\b', r'\bIMPORT\b',
+    ]
+    query_no_strings_upper = query_no_strings.upper()
+    for pattern in dangerous_patterns:
+        if re.search(pattern, query_no_strings_upper):
             return {
                 "success": False,
-                "error": f"Query contains disallowed keyword: {keyword}"
+                "error": "Query contains a disallowed operation"
+            }
+
+    # Block SQL comment syntax
+    if "--" in query_no_strings or "/*" in query_no_strings:
+        return {
+            "success": False,
+            "error": "SQL comments are not allowed"
+        }
+
+    # Block time-based blind SQL injection patterns
+    blind_sqli_patterns = [
+        r'\bpg_sleep\b', r'\bsleep\b', r'\bbenchmark\b',
+        r'\bwaitfor\b', r'\bdelay\b',
+        r'\bdblink\b', r'\blo_import\b', r'\blo_export\b',
+    ]
+    for pattern in blind_sqli_patterns:
+        if re.search(pattern, query_clean, re.IGNORECASE):
+            return {
+                "success": False,
+                "error": "Query contains a disallowed function"
+            }
+
+    # Block system table access
+    system_tables = [
+        r'information_schema', r'pg_catalog', r'pg_tables', r'pg_proc',
+        r'pg_shadow', r'pg_roles', r'pg_user', r'pg_stat', r'pg_settings',
+        r'pg_database', r'pg_authid', r'pg_class', r'pg_namespace',
+    ]
+    for pattern in system_tables:
+        if re.search(pattern, query_clean, re.IGNORECASE):
+            return {
+                "success": False,
+                "error": "Access to system tables is not allowed"
+            }
+
+    # Block subqueries in FROM clause — FROM (SELECT ...)
+    if re.search(r'\bFROM\s*\(', query_no_strings, re.IGNORECASE):
+        return {
+            "success": False,
+            "error": "Subqueries in FROM clause are not allowed"
+        }
+
+    # Block UNION-based injection
+    if re.search(r'\bUNION\b', query_no_strings_upper):
+        return {
+            "success": False,
+            "error": "UNION queries are not allowed"
+        }
+
+    # Ensure query only references the cyber_attacks table
+    from_tables = re.findall(r'\bFROM\s+(\w+)', query_no_strings, re.IGNORECASE)
+    join_tables = re.findall(r'\bJOIN\s+(\w+)', query_no_strings, re.IGNORECASE)
+    all_tables = from_tables + join_tables
+    for table in all_tables:
+        if table.lower() != "cyber_attacks":
+            return {
+                "success": False,
+                "error": "Only the 'cyber_attacks' table can be queried"
             }
 
     try:
-        results = await execute_query(query)
+        results = await execute_query(query_clean)
+        # Hard cap: never return more than 100 rows regardless of query
+        MAX_ROWS = 100
+        truncated = len(results) > MAX_ROWS
+        results = results[:MAX_ROWS]
         return {
             "success": True,
             "data": results,
-            "row_count": len(results)
+            "row_count": len(results),
+            "truncated": truncated
         }
     except Exception as e:
         return {
             "success": False,
-            "error": str(e)
+            "error": "Query execution failed"
         }
 
 

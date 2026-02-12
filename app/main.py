@@ -1,16 +1,35 @@
-from fastapi import FastAPI, HTTPException
+import logging
+from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from typing import Any, Dict, List, Optional
 from contextlib import asynccontextmanager
-import asyncio
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from app.config import get_settings
-from app.database import init_pool, close_pool
-from app.rag_engine import get_rag_engine
+
+logger = logging.getLogger("cyberrag")
+
+settings = get_settings()
 
 
-# Request/Response Models
+# --- Rate Limiter ---
+limiter = Limiter(key_func=get_remote_address, default_limits=[settings.rate_limit])
+
+
+# --- API Key Authentication ---
+async def verify_api_key(request: Request):
+    """Verify API key if configured."""
+    if not settings.api_key:
+        return  # No API key configured, skip auth
+    api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+    if api_key != settings.api_key:
+        raise HTTPException(status_code=401, detail="Invalid or missing API key")
+
+
+# --- Request/Response Models ---
 class QueryRequest(BaseModel):
     """Request model for natural language queries."""
     query: str = Field(..., min_length=1, max_length=1000, description="Natural language query")
@@ -33,6 +52,7 @@ class QueryResponse(BaseModel):
     row_count: Optional[int] = None
     reason: Optional[str] = None
     error: Optional[str] = None
+    note: Optional[str] = None
 
 
 class HealthResponse(BaseModel):
@@ -41,78 +61,95 @@ class HealthResponse(BaseModel):
     message: str
 
 
-# Lifespan context manager for startup/shutdown
+# --- Lifespan ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Handle startup and shutdown events."""
-    # Startup
+    from app.database import init_pool, close_pool
     print("Starting CyberRAG API...")
     await init_pool()
     print("Database connection pool initialized")
     yield
-    # Shutdown
     print("Shutting down CyberRAG API...")
     await close_pool()
     print("Database connection pool closed")
 
 
-# Create FastAPI app
+# --- Create FastAPI App ---
+is_production = settings.environment == "production"
+
 app = FastAPI(
     title="CyberRAG API",
     description="A RAG-based API for querying cyber threat intelligence data using natural language",
     version="1.0.0",
-    lifespan=lifespan
+    lifespan=lifespan,
+    docs_url=None if is_production else "/docs",
+    redoc_url=None if is_production else "/redoc",
 )
 
+# Register rate limiter
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    """Handle rate limit exceeded errors."""
+    return JSONResponse(
+        status_code=429,
+        content={
+            "success": False,
+            "message": "rate_limited",
+            "error": "Too many requests. Please try again later."
+        }
+    )
+
+
+# --- Endpoints ---
 
 @app.get("/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint."""
+    """Health check endpoint (no auth required)."""
     return HealthResponse(
         status="healthy",
         message="CyberRAG API is running"
     )
 
 
-@app.post("/query", response_model=QueryResponse)
-async def process_query(request: QueryRequest):
+@app.post("/query", response_model=QueryResponse, dependencies=[Depends(verify_api_key)])
+@limiter.limit(settings.rate_limit)
+async def process_query(request: Request, body: QueryRequest):
     """
     Process a natural language query about cyber threats.
 
-    This endpoint receives a natural language question, translates it to SQL
-    using an LLM, executes the query against the database, and returns
-    the results in JSON format.
-
-    If the question cannot be answered with the available data, it returns
-    a "not available" message with an explanation.
+    Requires X-API-Key header if API_KEY is configured.
     """
     try:
+        from app.rag_engine import get_rag_engine
         rag_engine = get_rag_engine()
 
-        # Process query asynchronously
-        result = await rag_engine.process_query(request.query)
+        result = await rag_engine.process_query(body.query)
 
         return QueryResponse(**result)
 
     except Exception as e:
+        # Log the full error internally but return sanitized message
+        logger.error(f"Query processing error: {type(e).__name__}: {str(e)}")
         return QueryResponse(
             success=False,
             message="error",
-            error=str(e)
+            error="An internal error occurred. Please try again later."
         )
 
 
-@app.get("/schema")
-async def get_schema_info():
+@app.get("/schema", dependencies=[Depends(verify_api_key)])
+@limiter.limit(settings.rate_limit)
+async def get_schema_info(request: Request):
     """
-    Get information about the database schema.
+    Get information about available query types.
 
-    Returns details about available columns and data types
-    to help users formulate their queries.
+    Requires X-API-Key header if API_KEY is configured.
     """
-    from app.database import get_schema_description
     return {
-        "schema_description": get_schema_description(),
         "available_query_types": [
             "Attack type statistics (e.g., 'What are the most common attack types?')",
             "Geographic distribution (e.g., 'Which countries are the main sources of attacks?')",
@@ -122,17 +159,16 @@ async def get_schema_info():
             "System impact (e.g., 'Which systems are most commonly targeted?')",
             "ML model performance (e.g., 'Which ML models have the highest confidence scores?')"
         ],
-        "note": "This database does NOT contain: user counts, financial loss, CVE IDs, company names"
+        "note": "Ask natural language questions about cyber attack data."
     }
 
 
 # Run with uvicorn
 if __name__ == "__main__":
     import uvicorn
-    settings = get_settings()
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
-        reload=True
+        reload=(settings.environment != "production")
     )

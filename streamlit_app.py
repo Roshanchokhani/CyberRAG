@@ -3,13 +3,26 @@ CyberRAG - Streamlit UI
 A simple web interface for querying cyber threat intelligence data.
 """
 
+import os
 import streamlit as st
 import requests
 import pandas as pd
 import json
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Configuration
-API_URL = "http://localhost:8000"
+API_URL = os.getenv("API_URL", "http://localhost:8000")
+API_KEY = os.getenv("API_KEY", "")
+
+
+def get_headers():
+    """Build request headers with API key if configured."""
+    headers = {"Content-Type": "application/json"}
+    if API_KEY:
+        headers["X-API-Key"] = API_KEY
+    return headers
 
 # Page config
 st.set_page_config(
@@ -94,7 +107,7 @@ with st.sidebar:
             st.success("✅ API Connected")
         else:
             st.error("❌ API Error")
-    except:
+    except requests.exceptions.RequestException:
         st.error("❌ API Offline - Start the server first")
 
 # Sample queries
@@ -135,6 +148,7 @@ if submit and query:
             response = requests.post(
                 f"{API_URL}/query",
                 json={"query": query},
+                headers=get_headers(),
                 timeout=120
             )
             result = response.json()
